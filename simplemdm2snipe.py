@@ -73,6 +73,8 @@ type_opts.add_argument("--appletv", help="Runs against SimpleMDM Apple TVs only.
 user_args = runtimeargs.parse_args()
 
 validarrays = [
+        "attributes",
+        "id",
         "general",
         "mdm",
         "activation_lock",
@@ -277,35 +279,49 @@ def simplemdm_access_test():
     else:
         logging.info('We were able to get a good response from your SimpleMDM instance.')
 
+# Initialize rate limiting counters
+snipe_api_count = 0
+first_snipe_call = None
+
 # This function is run every time a request is made, handles rate limiting for Snipe-IT.
 def request_handler(r, *args, **kwargs):
     global snipe_api_count
     global first_snipe_call
-    snipe_api_count = 0
-    first_snipe_call = None
 
-    if (snipe_base in r.url) and user_args.ratelimited:
-        if '"messages":429' in r.text:
-            logging.warning("Despite respecting the rate limit of Snipe-IT, we've still been limited. Trying again after sleeping for 3 seconds.")
-            time.sleep(3)
-            re_req = r.request
+    if snipe_base not in r.url:
+        return r
+
+    # Handle 429 rate limit responses with retry and exponential backoff
+    if r.status_code == 429 or '"messages":429' in r.text:
+        re_req = r.request
+        for attempt in range(5):
+            backoff_time = 2 ** attempt  # 1, 2, 4, 8, 16 seconds
+            logging.warning("Rate limited by Snipe-IT. Backing off for {} seconds (attempt {}/5)...".format(backoff_time, attempt + 1))
+            time.sleep(backoff_time)
             s = requests.Session()
-            return s.send(re_req)
-        if snipe_api_count == 0:
+            s.headers.update(snipeheaders)
+            retry_response = s.send(re_req, verify=user_args.do_not_verify_ssl)
+            if retry_response.status_code != 429 and '"messages":429' not in retry_response.text:
+                logging.info("Retry succeeded after backoff.")
+                return retry_response
+        logging.error("Still rate limited after 5 retries. Exiting.")
+        sys.exit(exit_error_message)
+
+    # Proactive rate limiting when -r flag is used
+    if user_args.ratelimited:
+        if first_snipe_call is None:
             first_snipe_call = time.time()
             time.sleep(0.5)
         snipe_api_count += 1
-        time_elapsed = (time.time() - first_snipe_call)
-        snipe_api_rate = snipe_api_count / time_elapsed
-        if snipe_api_rate > 1.95:
-            sleep_time = 0.5 + (snipe_api_rate - 1.95)
-            logging.debug('Going over Snipe-IT rate limit of 120/minute ({}/minute), sleeping for {}'.format(snipe_api_rate,sleep_time))
-            time.sleep(sleep_time)
-        logging.debug("Made {} requests to Snipe-IT in {} seconds, with a request being sent every {} seconds".format(snipe_api_count, time_elapsed, snipe_api_rate))
-    if '"messages":429' in r.text:
-        logging.error(r.content)
-        logging.error("We've been rate limited. Use option -r to respect the built in Snipe-IT API rate limit of 120/minute.")
-        sys.exit(exit_error_message)
+        time_elapsed = time.time() - first_snipe_call
+        if time_elapsed > 0:
+            snipe_api_rate = snipe_api_count / time_elapsed
+            if snipe_api_rate > 1.95:
+                sleep_time = 0.5 + (snipe_api_rate - 1.95)
+                logging.debug('Going over Snipe-IT rate limit of 120/minute ({:.2f}/sec), sleeping for {:.2f}s'.format(snipe_api_rate, sleep_time))
+                time.sleep(sleep_time)
+            logging.debug("Made {} requests to Snipe-IT in {:.1f} seconds ({:.2f} req/sec)".format(snipe_api_count, time_elapsed, snipe_api_rate))
+
     return r
 
 # SimpleMDM API Error Handling
@@ -340,6 +356,13 @@ def simplemdm_error_handling(resp, resp_code, err_msg):
             "\t\t\t sent successfully.\n"
         )
         sys.exit(exit_error_message)
+    # 422
+    elif resp_code == requests.codes["unprocessable_entity"]:
+        logging.warning(f"SimpleMDM rejected the request (422 Unprocessable Entity): {err_msg}")
+        logging.warning(f"\tResponse msg: {resp.text}")
+        logging.warning("\tThis often means a custom attribute (e.g. 'asset_tag') has not been created in SimpleMDM yet.")
+        logging.warning("\tSkipping this update and continuing...")
+        return
     # 429
     elif resp_code == requests.codes["too_many_requests"]:
         logging.error(f"{err_msg}")
@@ -357,8 +380,8 @@ def simplemdm_error_handling(resp, resp_code, err_msg):
         logging.error("Unable to reach the service. Try again later...")
         sys.exit(exit_error_message)
     else:
-        logging.error("Something really bad must have happened...")
-        logging.error(f"{err_msg}")
+        logging.error("Unexpected error from SimpleMDM (HTTP {}): {}".format(resp_code, err_msg))
+        logging.error(f"\tResponse msg: {resp.text}")
         sys.exit(exit_error_message)
 
 # Function to use the SimpleMDM API
@@ -427,7 +450,8 @@ def get_simplemdm_devices():
         logging.debug('Calling for all devices in SimpleMDM against: {}'.format(simplemdm_base + endpoint))
         response = simplemdm_api(method="GET", endpoint=endpoint, params=params)
         count += len(response['data'])
-        starting_after += limit
+        if response['data']:
+            starting_after = response['data'][-1]['id']
         has_more = response['has_more']
 
         logging.debug('Retrieved {} SimpleMDM devices and has_more is:{}'.format(count, has_more))
@@ -593,6 +617,9 @@ def create_snipe_model(payload):
     response = requests.post(api_url, headers=snipeheaders, json=payload, verify=user_args.do_not_verify_ssl, hooks={'response': request_handler})
     if response.status_code == 200:
         jsonresponse = response.json()
+        if jsonresponse.get('payload') is None:
+            logging.warning('Model creation failed for {}: {}'.format(payload.get('name'), jsonresponse.get('messages')))
+            return False
         modelnumbers[jsonresponse['payload']['model_number']] = jsonresponse['payload']['id']
         return True
     else:
@@ -808,11 +835,13 @@ for simplemdm_device in simplemdm_devices:
 
     if simplemdm_device['attributes']['product_name'] not in modelnumbers:
         logging.info("Could not find a model ID in Snipe-IT for: {}".format(simplemdm_device['attributes']['model']))
-        newmodel = {"category_id":config['snipe-it'][category_id],"manufacturer_id":apple_manufacturer_id,"name": simplemdm_device['attributes']['model_name'],"model_number":simplemdm_device['attributes']['product_name']}
+        newmodel = {"category_id":int(config['snipe-it'][category_id]),"manufacturer_id":int(apple_manufacturer_id),"name": simplemdm_device['attributes']['model_name'],"model_number":simplemdm_device['attributes']['product_name']}
         if custom_fieldset_id in config['snipe-it']:
             fieldset_split = config['snipe-it'][custom_fieldset_id]
             newmodel['fieldset_id'] = fieldset_split
-        create_snipe_model(newmodel)
+        if not create_snipe_model(newmodel):
+          logging.warning('Skipping asset creation for {} because model could not be created.'.format(simplemdm_device['attributes']['device_name']))
+        continue
 
     # Pass the SN from SimpleMDM to search for a match in Snipe-IT
     snipe = search_snipe_asset(simplemdm_device['attributes']['serial_number'])
