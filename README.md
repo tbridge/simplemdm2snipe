@@ -140,6 +140,44 @@ optional arguments:
 
 ```
 
+## Reporting
+
+`simplemdm2snipe_report.py` runs after a sync and posts a summary to Slack:
+
+- **New assets** and **new models** created in Snipe-IT since the run started (read from the Snipe-IT API, so it's accurate regardless of logging flags)
+- **Problems**: every WARNING / ERROR line the sync wrote to `simplemdm2snipe.log` during this run, de-duplicated with counts
+- **Deferred devices**: devices skipped this run because their model had to be created first (requires `-v`); they're picked up on the next run
+- **Run status**: flags a failed run using the sync's exit code
+
+The easiest way to use it is `run_sync.sh`, which records the start time, runs the sync, and then runs the report even if the sync failed. Point your scheduled job at it instead of at `simplemdm2snipe.py`:
+
+```bash
+# Uses SYNC_ARGS (default: -l -v -r -u) when no arguments are given
+/opt/simplemdm2snipe/run_sync.sh
+
+# Or pass your own sync flags
+/opt/simplemdm2snipe/run_sync.sh -l -v -r -u --mac
+```
+
+Configure the Slack webhook in the `[reporting]` section of `settings.conf` (see `settings.conf.example`) or with `SLACK_WEBHOOK_URL`. Without a webhook, the report prints to stdout.
+
+The report needs the Snipe-IT API key to have **View** on Assets and Models, which the sync already requires.
+
+Standalone usage:
+
+```
+usage: simplemdm2snipe_report [-h] [--since SINCE | --since-hours SINCE_HOURS] [--exit-code EXIT_CODE] [--log LOG]
+                              [--config CONFIG] [--print] [--json] [--quiet-if-clean] [--do_not_verify_ssl] [-d] [--version]
+
+  --since           Run start as ISO-8601 (e.g. 2026-10-05T06:00:00Z)
+  --since-hours     Report on the last N hours instead (default 24)
+  --exit-code       The sync's exit code, so a failed run is flagged
+  --log             Path to simplemdm2snipe.log (overrides [reporting] log_file)
+  --print           Print the report instead of posting to Slack
+  --json            Print the raw report data as JSON
+  --quiet-if-clean  Don't post when nothing was added and nothing went wrong
+```
+
 ## Testing
 
 It is recommended that you use a test/dev Snipe-IT instance for testing and that your backups are up to date. You can spin up a Snipe-IT instance in Docker pretty quickly ([see the Snipe-IT docs](https://snipe-it.readme.io/docs/docker)).

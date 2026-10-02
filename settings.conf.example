@@ -42,6 +42,17 @@ pattern_iphone = IPHONE- hardware_overview serial_number
 pattern_ipad = IPAD- hardware_overview serial_number
 pattern_appletv = ATV- hardware_overview serial_number
 
+[reporting]
+# Used by simplemdm2snipe_report.py (run automatically by run_sync.sh after each sync).
+# Slack incoming webhook for the channel that should get the report.
+# The SLACK_WEBHOOK_URL environment variable overrides this.
+slack_webhook_url =
+# Where the sync writes its log when run with -l (relative paths resolve from the working directory).
+log_file = simplemdm2snipe.log
+title = SimpleMDM -> Snipe-IT sync
+# Post even when nothing was added and nothing went wrong (a heartbeat that the job ran).
+post_when_quiet = yes
+
 # API Mappings are not required unless mapping SimpleMDM data to Snipe-IT custom fields
 
 [mac-api-mapping]
