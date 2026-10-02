@@ -44,7 +44,11 @@ pattern_appletv = ATV- hardware_overview serial_number
 
 [reporting]
 # Used by simplemdm2snipe_report.py (run automatically by run_sync.sh after each sync).
-# Slack incoming webhook for the channel that should get the report.
+# Option 1: a Slack bot token (scope chat:write) plus the channel ID it should post to.
+# The bot must be a member of the channel. SLACK_BOT_TOKEN / SLACK_CHANNEL override these.
+slack_bot_token =
+slack_channel =
+# Option 2: an incoming webhook (used only when no bot token is set).
 # The SLACK_WEBHOOK_URL environment variable overrides this.
 slack_webhook_url =
 # Where the sync writes its log when run with -l (relative paths resolve from the working directory).

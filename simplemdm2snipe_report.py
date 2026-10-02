@@ -19,12 +19,17 @@
 #   Uses the same settings.conf as simplemdm2snipe.py, plus an optional [reporting] section:
 #
 #     [reporting]
+#     # Either a bot token + channel (bot must be in the channel, scope chat:write) ...
+#     slack_bot_token = xoxb-...
+#     slack_channel = C0123456789
+#     # ... or an incoming webhook (used only when no bot token is set)
 #     slack_webhook_url = https://hooks.slack.com/services/...
 #     log_file = /opt/simplemdm2snipe/simplemdm2snipe.log
 #     title = SimpleMDM -> Snipe-IT sync
 #     post_when_quiet = yes
 #
-#   SLACK_WEBHOOK_URL and SNIPE_APIKEY environment variables override settings.conf.
+#   SLACK_BOT_TOKEN, SLACK_CHANNEL, SLACK_WEBHOOK_URL and SNIPE_APIKEY environment
+#   variables override settings.conf.
 #
 # USAGE:
 #   Normally called by run_sync.sh. Standalone examples:
@@ -122,6 +127,8 @@ def load_settings(path=None):
         "snipe_base": snipe.get("url", "").rstrip("/"),
         "snipe_apikey": os.environ.get("SNIPE_APIKEY") or snipe.get("apikey", ""),
         "snipe_timezone": snipe.get("timezone", "UTC"),
+        "slack_bot_token": os.environ.get("SLACK_BOT_TOKEN") or reporting.get("slack_bot_token", ""),
+        "slack_channel": os.environ.get("SLACK_CHANNEL") or reporting.get("slack_channel", ""),
         "slack_webhook_url": os.environ.get("SLACK_WEBHOOK_URL") or reporting.get("slack_webhook_url", ""),
         "log_file": reporting.get("log_file", "simplemdm2snipe.log"),
         "title": reporting.get("title", "SimpleMDM → Snipe-IT sync"),
@@ -459,8 +466,33 @@ def render_text(report, tzname):
     return "\n".join(out)
 
 
-def post_to_slack(webhook_url, payload):
-    response = requests.post(webhook_url, data=json.dumps(payload),
+SLACK_POST_MESSAGE = "https://slack.com/api/chat.postMessage"
+
+
+def slack_destination(settings):
+    """Prefer a bot token + channel; fall back to an incoming webhook. None if neither is set."""
+    if settings["slack_bot_token"]:
+        if not settings["slack_channel"]:
+            sys.exit("slack_bot_token is set but slack_channel is not; set the channel ID in [reporting].")
+        return "bot"
+    if settings["slack_webhook_url"]:
+        return "webhook"
+    return None
+
+
+def post_to_slack(settings, payload):
+    if slack_destination(settings) == "bot":
+        body = dict(payload, channel=settings["slack_channel"], unfurl_links=False, unfurl_media=False)
+        response = requests.post(SLACK_POST_MESSAGE, data=json.dumps(body), timeout=30, headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": "Bearer {}".format(settings["slack_bot_token"])})
+        # chat.postMessage returns HTTP 200 with ok:false on failure (e.g. not_in_channel).
+        result = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else {}
+        if response.status_code != 200 or not result.get("ok"):
+            raise RuntimeError("Slack chat.postMessage failed (HTTP {}): {}".format(
+                response.status_code, result.get("error") or response.text[:200]))
+        return
+    response = requests.post(settings["slack_webhook_url"], data=json.dumps(payload),
                              headers={"Content-Type": "application/json"}, timeout=30)
     if response.status_code != 200:
         raise RuntimeError("Slack returned HTTP {}: {}".format(response.status_code, response.text[:200]))
@@ -491,13 +523,13 @@ def main(argv=None):
         logging.info("Nothing to report; not posting.")
         return 0
 
-    if not settings["slack_webhook_url"]:
+    if not slack_destination(settings):
         print(render_text(report, tzname))
-        print("\n(No Slack webhook configured; printed instead.)", file=sys.stderr)
+        print("\n(No Slack bot token or webhook configured; printed instead.)", file=sys.stderr)
         return 0
 
     try:
-        post_to_slack(settings["slack_webhook_url"], build_slack_payload(report, tzname))
+        post_to_slack(settings, build_slack_payload(report, tzname))
     except Exception as exc:
         print(render_text(report, tzname))
         print("\nFailed to post to Slack: {}".format(exc), file=sys.stderr)
