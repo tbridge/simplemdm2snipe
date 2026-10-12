@@ -149,14 +149,14 @@ optional arguments:
 - **Deferred devices**: devices skipped this run because their model had to be created first (requires `-v`); they're picked up on the next run
 - **Run status**: flags a failed run using the sync's exit code
 
-The easiest way to use it is `run_sync.sh`, which records the start time, runs the sync, and then runs the report even if the sync failed. Point your scheduled job at it instead of at `simplemdm2snipe.py`:
+The easiest way to use it is `run_sync.sh`, which records the start time, runs the sync (using `./venv/bin/python` when present), captures its output to `simplemdm2snipe-lastrun.log`, and then runs the report even if the sync failed. Output still streams to stdout, so launchd/cron logging is unchanged. Point your scheduled job at it instead of at `simplemdm2snipe.py`:
 
 ```bash
-# Uses SYNC_ARGS (default: -l -v -r -u) when no arguments are given
+# Uses SYNC_ARGS (default: -v -r) when no arguments are given
 /opt/simplemdm2snipe/run_sync.sh
 
 # Or pass your own sync flags
-/opt/simplemdm2snipe/run_sync.sh -l -v -r -u --mac
+/opt/simplemdm2snipe/run_sync.sh -v -r -u --mac
 ```
 
 Configure Slack in the `[reporting]` section of `settings.conf` (see `settings.conf.example`), either with a bot token (`slack_bot_token`, scope `chat:write`) plus the channel ID (`slack_channel`), or with an incoming webhook (`slack_webhook_url`). The bot must be a member of the channel. `SLACK_BOT_TOKEN`, `SLACK_CHANNEL` and `SLACK_WEBHOOK_URL` environment variables override the file. With neither configured, the report prints to stdout.
